@@ -37,43 +37,14 @@
     }
 ```
 
-``` Activity Thread
+Activity Thread
+``` 
 public static void main(String[] args) {
-        Trace.traceBegin(Trace.TRACE_TAG_ACTIVITY_MANAGER, "ActivityThreadMain");
-
-        // Install selective syscall interception
-        AndroidOs.install();
-
-        // CloseGuard defaults to true and can be quite spammy.  We
-        // disable it here, but selectively enable it later (via
-        // StrictMode) on debug builds, but using DropBox, not logs.
-        CloseGuard.setEnabled(false);
-
-        Environment.initForCurrentUser();
-
-        // Make sure TrustedCertificateStore looks in the right place for CA certificates
-        final File configDir = Environment.getUserConfigDirectory(UserHandle.myUserId());
-        TrustedCertificateStore.setDefaultUserDirectory(configDir);
-
-        // Call per-process mainline module initialization.
-        initializeMainlineModules();
-
-        Process.setArgV0("<pre-initialized>");
 
         Looper.prepareMainLooper();
 
-        // Find the value for {@link #PROC_START_SEQ_IDENT} if provided on the command line.
-        // It will be in the format "seq=114"
-        long startSeq = 0;
-        if (args != null) {
-            for (int i = args.length - 1; i >= 0; --i) {
-                if (args[i] != null && args[i].startsWith(PROC_START_SEQ_IDENT)) {
-                    startSeq = Long.parseLong(
-                            args[i].substring(PROC_START_SEQ_IDENT.length()));
-                }
-            }
-        }
         ActivityThread thread = new ActivityThread();
+	// 会有个seq号
         thread.attach(false, startSeq);
 
         if (sMainThreadHandler == null) {
@@ -86,9 +57,80 @@ public static void main(String[] args) {
         }
 
         // End of event ActivityThreadMain.
-        Trace.traceEnd(Trace.TRACE_TAG_ACTIVITY_MANAGER);
         Looper.loop();
 
         throw new RuntimeException("Main thread loop unexpectedly exited");
+    }
+```
+
+直接看消息机制loopOnce
+```
+private static boolean loopOnce(final Looper me,
+            final long ident, final int thresholdOverride) {
+        Message msg = me.mQueue.next(); // might block
+        if (msg == null) {
+            // No message indicates that the message queue is quitting.
+            return false;
+        }
+
+        // Make sure the observer won't change while processing a transaction.
+        final Observer observer = sObserver;
+
+        final long traceTag = me.mTraceTag;
+        long slowDispatchThresholdMs = me.mSlowDispatchThresholdMs;
+        long slowDeliveryThresholdMs = me.mSlowDeliveryThresholdMs;
+        if (thresholdOverride > 0) {
+            slowDispatchThresholdMs = thresholdOverride;
+            slowDeliveryThresholdMs = thresholdOverride;
+        }
+        final boolean logSlowDelivery = (slowDeliveryThresholdMs > 0) && (msg.when > 0);
+        final boolean logSlowDispatch = (slowDispatchThresholdMs > 0);
+
+        final boolean needStartTime = logSlowDelivery || logSlowDispatch;
+        final boolean needEndTime = logSlowDispatch;
+
+        if (traceTag != 0 && Trace.isTagEnabled(traceTag)) {
+            Trace.traceBegin(traceTag, msg.target.getTraceName(msg));
+        }
+
+        final long dispatchStart = needStartTime ? SystemClock.uptimeMillis() : 0;
+        final long dispatchEnd;
+        Object token = null;
+        if (observer != null) {
+            token = observer.messageDispatchStarting();
+        }
+        long origWorkSource = ThreadLocalWorkSource.setUid(msg.workSourceUid);
+        try {
+            msg.target.dispatchMessage(msg);
+            if (observer != null) {
+                observer.messageDispatched(token, msg);
+            }
+            dispatchEnd = needEndTime ? SystemClock.uptimeMillis() : 0;
+        } catch (Exception exception) {
+            if (observer != null) {
+                observer.dispatchingThrewException(token, msg, exception);
+            }
+            throw exception;
+        } finally {
+            ThreadLocalWorkSource.restore(origWorkSource);
+            if (traceTag != 0) {
+                Trace.traceEnd(traceTag);
+            }
+        }
+
+        // Make sure that during the course of dispatching the
+        // identity of the thread wasn't corrupted.
+        final long newIdent = Binder.clearCallingIdentity();
+        if (ident != newIdent) {
+            Log.wtf(TAG, "Thread identity changed from 0x"
+                    + Long.toHexString(ident) + " to 0x"
+                    + Long.toHexString(newIdent) + " while dispatching to "
+                    + msg.target.getClass().getName() + " "
+                    + msg.callback + " what=" + msg.what);
+        }
+
+        msg.recycleUnchecked();
+
+        return true;
     }
 ```
